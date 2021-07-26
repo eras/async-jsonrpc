@@ -237,7 +237,7 @@ async fn handle_from_front_message(msg: ToBackTaskMessage, manager: &mut TaskMan
         ToBackTaskMessage::SubscribeAll {
 	    send_back,
         } => {
-	    let (notification_tx, notification_rx) = mpsc::channel(4);
+	    let (notification_tx, notification_rx) = mpsc::channel(64);
 	    manager.insert_all_subscriptions(notification_tx);
 	    send_back.send(notification_rx).expect("Send subscription all request error back");
         },

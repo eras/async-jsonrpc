@@ -9,6 +9,7 @@ type PendingMethodCall = oneshot::Sender<Result<Output, WsClientError>>;
 type PendingBatchMethodCall = oneshot::Sender<Result<Vec<Output>, WsClientError>>;
 type PendingSubscription = oneshot::Sender<Result<(Id, mpsc::Receiver<SubscriptionNotification>), WsClientError>>;
 type ActiveSubscription = mpsc::Sender<SubscriptionNotification>;
+type AllSubscription = mpsc::Sender<Notification>;
 type PendingUnsubscribe = oneshot::Sender<Result<bool, WsClientError>>;
 
 #[derive(Debug)]
@@ -42,6 +43,10 @@ pub struct TaskManager {
     requests: HashMap<u64, RequestKind>,
     /// Helper to find a request ID by subscription ID instead of looking through all requests.
     subscriptions: HashMap<Id, u64>,
+    /// This id will be used for the next all_subscriptions entry
+    next_all_subscriptions_id: u64,
+    /// Handle all notifications without subscriptsion id with this handler; ID is internally generated
+    all_subscriptions: HashMap<u64, AllSubscription>,
     /// Max capacity of every subscription channel.
     pub(crate) max_capacity_per_subscription: usize,
 }
@@ -51,6 +56,8 @@ impl TaskManager {
         Self {
             requests: HashMap::new(),
             subscriptions: HashMap::new(),
+            next_all_subscriptions_id: 0,
+            all_subscriptions: HashMap::new(),
             max_capacity_per_subscription,
         }
     }
@@ -166,6 +173,13 @@ impl TaskManager {
         }
     }
 
+    pub fn insert_all_subscriptions(&mut self, send_back: AllSubscription) -> u64 {
+        let id = self.next_all_subscriptions_id;
+        self.next_all_subscriptions_id += 1;
+        self.all_subscriptions.insert(id, send_back);
+        id
+    }
+
     /// Tries to remove an active subscription from manager.
     pub fn remove_active_subscription(&mut self, request_id: u64, subscription_id: Id) -> Option<ActiveSubscription> {
         match (
@@ -232,6 +246,16 @@ impl TaskManager {
                 RequestKind::ActiveSubscription(_) => RequestStatus::ActiveSubscription,
                 RequestKind::PendingUnsubscribe(_) => RequestStatus::PendingUnsubscribe,
             })
+    }
+
+    /// Handle an inbound call
+    pub fn handle_notification(&mut self, notification: &Notification) -> Result<(), WsClientError> {
+        for (_key, handler) in &mut self.all_subscriptions {
+            handler
+                .try_send(notification.clone())
+                .map_err(|_| WsClientError::InternalChannel)?;
+        }
+        Ok(())
     }
 
     /// Gets a mutable reference to active subscription sink to send messages back to

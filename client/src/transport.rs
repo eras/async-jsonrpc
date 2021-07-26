@@ -32,6 +32,9 @@ pub trait PubsubTransport: Transport {
     /// The subscription stream.
     type NotificationStream: Stream<Item = SubscriptionNotification>;
 
+    /// The subscription stream for all notifications
+    type AllNotificationsStream: Stream<Item = Notification>;
+
     /// Add a subscription to this transport.
     ///
     /// Will send unsubscribe request to the server when drop the notification stream.
@@ -42,6 +45,15 @@ pub trait PubsubTransport: Transport {
     ) -> Result<(Id, Self::NotificationStream), Self::Error>
     where
         M: Into<String> + Send;
+
+    /// Add a subscription for all events; does not actually issue a subscription request
+    ///
+    /// As no request is sent (it is assumed the server has initiated
+    /// the sending of these these notifications some other way), no
+    /// unsubscription request will be sent either.
+    async fn subscribe_all(
+        &self,
+    ) -> Result<Self::AllNotificationsStream, Self::Error>;
 
     /// Send an unsubscribe request to the server manually.
     async fn unsubscribe<M>(&self, unsubscribe_method: M, subscription_id: Id) -> Result<bool, Self::Error>

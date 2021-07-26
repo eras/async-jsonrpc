@@ -234,6 +234,13 @@ async fn handle_from_front_message(msg: ToBackTaskMessage, manager: &mut TaskMan
                     .expect("Send subscription request error back");
             }
         },
+        ToBackTaskMessage::SubscribeAll {
+	    send_back,
+        } => {
+	    let (notification_tx, notification_rx) = mpsc::channel(4);
+	    manager.insert_all_subscriptions(notification_tx);
+	    send_back.send(notification_rx).expect("Send subscription all request error back");
+        },
         ToBackTaskMessage::Unsubscribe {
             unsubscribe_method,
             subscription_id,
@@ -270,6 +277,8 @@ async fn handle_from_back_message(
                 handle_response_message(response, manager)?
             } else if let Ok(notification) = serde_json::from_str::<SubscriptionNotification>(&msg) {
                 handle_subscription_notification_message(notification, manager);
+            } else if let Ok(notification) = serde_json::from_str::<Notification>(&msg) {
+                handle_notification_message(notification, manager);
             } else {
                 log::warn!("[backend] Ignore unknown websocket text message: {}", msg);
             }
@@ -297,7 +306,7 @@ fn handle_response_message(response: Response, manager: &mut TaskManager) -> Res
 }
 
 fn handle_single_output(output: Output, manager: &mut TaskManager) -> Result<(), WsClientError> {
-    let response_id = response_id_of(&output)?;
+    let response_id = response_id_of_output(&output)?;
     match manager.request_status(&response_id) {
         RequestStatus::PendingMethodCall => {
             log::debug!("[backend] Handle response of method call: id={}", response_id);
@@ -390,7 +399,7 @@ fn handle_single_output(output: Output, manager: &mut TaskManager) -> Result<(),
     }
 }
 
-fn response_id_of(output: &Output) -> Result<u64, WsClientError> {
+fn response_id_of_output(output: &Output) -> Result<u64, WsClientError> {
     Ok(*output
         .id()
         .ok_or(WsClientError::InvalidRequestId)?
@@ -462,5 +471,11 @@ fn handle_subscription_notification_message(notification: SubscriptionNotificati
             "[backend] Subscription id ({:?}) is not an active subscription",
             subscription_id
         ),
+    }
+}
+
+fn handle_notification_message(notification: Notification, manager: &mut TaskManager) {
+    if let Err(err) = manager.handle_notification(&notification) {
+	log::error!("[backend] Dropped some incoming general notifications: {}", err);
     }
 }

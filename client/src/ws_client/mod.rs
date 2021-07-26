@@ -45,6 +45,9 @@ pub(crate) enum ToBackTaskMessage {
         /// from the server about the subscription.
         send_back: oneshot::Sender<Result<(Id, mpsc::Receiver<SubscriptionNotification>), WsClientError>>,
     },
+    SubscribeAll {
+        send_back: oneshot::Sender<mpsc::Receiver<Notification>>,
+    },
     Unsubscribe {
         unsubscribe_method: String,
         subscription_id: Id,
@@ -160,7 +163,7 @@ impl WsClient {
         &self,
         subscribe_method: impl Into<String>,
         params: Option<Params>,
-    ) -> Result<WsSubscription<SubscriptionNotification>, WsClientError> {
+    ) -> Result<WsSubscription<SubscriptionNotification, Id>, WsClientError> {
         let subscribe_method = subscribe_method.into();
         log::debug!("[frontend] Subscribe: method={}, params={:?}", subscribe_method, params);
         let (tx, rx) = oneshot::channel();
@@ -192,6 +195,25 @@ impl WsClient {
             Ok(Err(err)) => Err(err),
             Err(_) => Err(WsClientError::InternalChannel),
         }
+    }
+
+    async fn subscribe_all(
+        &self,
+    ) ->
+	Result<WsSubscription<Notification, ()>, WsClientError> {
+
+        log::debug!("[frontend] Subscribe all");
+        let (tx, rx) = oneshot::channel();
+        self.to_back
+            .clone()
+            .send(ToBackTaskMessage::SubscribeAll {
+                send_back: tx,
+            })
+            .await
+            .map_err(|_| WsClientError::InternalChannel)?;
+	let notification_rx = rx.await.map_err(|_| WsClientError::InternalChannel)?;
+	let subscription = WsSubscription { id: (), notification_rx };
+	Ok(subscription)
     }
 
     /// Sends an unsubscribe request to the server.
@@ -240,14 +262,14 @@ impl WsClient {
 }
 
 /// Active subscription on a websocket client.
-pub struct WsSubscription<Notif> {
+pub struct WsSubscription<Notif, Id = id::Id> {
     /// Subscription ID.
     pub id: Id,
     /// Channel from which we receive notifications from the server.
     notification_rx: mpsc::Receiver<Notif>,
 }
 
-impl<Notif> WsSubscription<Notif> {
+impl<Notif, Id> WsSubscription<Notif, Id> {
     /// Returns the next notification from the websocket stream.
     ///
     /// Ignore any malformed packet.
@@ -256,7 +278,15 @@ impl<Notif> WsSubscription<Notif> {
     }
 }
 
-impl<Notif> Stream for WsSubscription<Notif> {
+impl<Notif> Stream for WsSubscription<Notif, Id> {
+    type Item = Notif;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        mpsc::Receiver::<Notif>::poll_next(Pin::new(&mut self.notification_rx), cx)
+    }
+}
+
+impl<Notif> Stream for WsSubscription<Notif, ()> {
     type Item = Notif;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -290,7 +320,8 @@ impl BatchTransport for WsClient {
 
 #[async_trait::async_trait]
 impl PubsubTransport for WsClient {
-    type NotificationStream = WsSubscription<SubscriptionNotification>;
+    type NotificationStream = WsSubscription<SubscriptionNotification, Id>;
+    type AllNotificationsStream = WsSubscription<Notification, ()>;
 
     async fn subscribe<M>(
         &self,
@@ -302,6 +333,14 @@ impl PubsubTransport for WsClient {
     {
         let notification_stream = self.send_subscribe(subscribe_method, params).await?;
         Ok((notification_stream.id.clone(), notification_stream))
+    }
+
+    async fn subscribe_all(
+        &self,
+    ) -> Result<Self::AllNotificationsStream, <Self as Transport>::Error>
+    {
+        let notification_stream = self.subscribe_all().await?;
+        Ok(notification_stream)
     }
 
     async fn unsubscribe<M>(
